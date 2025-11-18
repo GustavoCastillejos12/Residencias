@@ -1,0 +1,171 @@
+import React, { useState, useEffect } from 'react';
+import ApiService from '../services/api';
+import RegistrarAlumno from './RegistrarAlumno';
+
+function GrupoDetail({ grupo, onBack, onRefresh }) {
+  const [alumnos, setAlumnos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showRegistrar, setShowRegistrar] = useState(false);
+  const [registrandoHuella, setRegistrandoHuella] = useState(null);
+
+  useEffect(() => {
+    loadAlumnos();
+  }, [grupo.grupo_id]);
+
+  const loadAlumnos = async () => {
+    try {
+      setLoading(true);
+      const response = await ApiService.getAlumnosGrupo(grupo.grupo_id);
+      setAlumnos(response.alumnos || []);
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegistrarHuella = async (alumnoId, alumnoName) => {
+    if (!window.confirm(`¿Registrar huella para ${alumnoName}?\n\nColoca el dedo en el lector cuando se solicite.`)) {
+      return;
+    }
+
+    setRegistrandoHuella(alumnoId);
+    try {
+      await ApiService.registrarHuella(alumnoId);
+      alert(`✓ Huella registrada exitosamente para ${alumnoName}`);
+      loadAlumnos();
+    } catch (err) {
+      alert(`Error: ${err.message}`);
+    } finally {
+      setRegistrandoHuella(null);
+    }
+  };
+
+  const handleDelete = async (alumnoId, alumnoName) => {
+    if (!window.confirm(`¿Estás seguro de eliminar a ${alumnoName}?`)) {
+      return;
+    }
+
+    try {
+      await ApiService.deleteAlumno(alumnoId);
+      alert('Alumno eliminado exitosamente');
+      loadAlumnos();
+    } catch (err) {
+      alert(`Error: ${err.message}`);
+    }
+  };
+
+  const handleAlumnoCreated = () => {
+    setShowRegistrar(false);
+    loadAlumnos();
+  };
+
+  if (loading) {
+    return <div className="loading">Cargando alumnos...</div>;
+  }
+
+  return (
+    <div>
+      <div className="section-header">
+        <div>
+          <button className="button" onClick={onBack} style={{ marginRight: '15px', marginBottom: '10px' }}>
+            ← Volver a Grupos
+          </button>
+          <h2>{grupo.nombre}</h2>
+          <p className="grupo-subtitle">{grupo.carrera_tecnica || 'Carrera técnica no especificada'}</p>
+        </div>
+        <button 
+          className="button button-primary"
+          onClick={() => setShowRegistrar(!showRegistrar)}
+        >
+          {showRegistrar ? 'Cancelar' : 'Registrar Alumno'}
+        </button>
+      </div>
+
+      {showRegistrar && (
+        <RegistrarAlumno 
+          grupoId={grupo.grupo_id}
+          onSuccess={handleAlumnoCreated}
+          onCancel={() => setShowRegistrar(false)}
+        />
+      )}
+
+      {error && (
+        <div className="alert alert-error">
+          <strong>Error:</strong> {error}
+        </div>
+      )}
+
+      <div className="alumnos-header">
+        <h3>Lista de Alumnos ({alumnos.length})</h3>
+        <button className="button" onClick={loadAlumnos}>
+          Actualizar
+        </button>
+      </div>
+
+      {alumnos.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-icon">👥</div>
+          <h3>No hay alumnos registrados</h3>
+          <p>Comience registrando el primer alumno del grupo</p>
+        </div>
+      ) : (
+        <div className="table-container">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Nombre Completo</th>
+                <th>ID</th>
+                <th>Estado Huella</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {alumnos.map((alumno, index) => (
+                <tr key={alumno.user_id}>
+                  <td>{index + 1}</td>
+                  <td className="nombre-cell">
+                    <strong>{alumno.name}</strong>
+                  </td>
+                  <td>{alumno.user_id}</td>
+                  <td>
+                    {alumno.tiene_huella ? (
+                      <span className="badge badge-success">Registrada</span>
+                    ) : (
+                      <span className="badge badge-warning">Pendiente</span>
+                    )}
+                  </td>
+                  <td>
+                    <div className="action-buttons">
+                      <button
+                        className="button button-success"
+                        onClick={() => handleRegistrarHuella(alumno.user_id, alumno.name)}
+                        disabled={registrandoHuella === alumno.user_id}
+                        title="Registrar o actualizar huella digital"
+                      >
+                        {registrandoHuella === alumno.user_id ? 'Capturando...' : 'Registrar Huella'}
+                      </button>
+                      <button
+                        className="button button-danger"
+                        onClick={() => handleDelete(alumno.user_id, alumno.name)}
+                        title="Eliminar alumno"
+                      >
+                        Eliminar
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default GrupoDetail;
+

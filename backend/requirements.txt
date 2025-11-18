@@ -1,0 +1,19 @@
+# Requisitos para el Sistema de Pase de Lista con Huellas Digitales
+# Backend API en Python
+
+# Framework web
+Flask>=2.3.0
+flask-cors>=4.0.0
+
+# Utilidades (opcional pero recomendado)
+python-dotenv>=1.0.0  # Para variables de entorno
+
+# Generación de archivos Excel
+openpyxl>=3.1.0
+
+# Nota: Este proyecto utiliza ctypes para interactuar con las DLLs del SDK
+# de DigitalPersona, por lo que no requiere paquetes adicionales para la
+# funcionalidad de huellas. El SDK debe estar instalado en el sistema.
+
+
+

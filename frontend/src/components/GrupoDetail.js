@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import ApiService from '../services/api';
+import WebAuthnService from '../services/webauthn';
 import RegistrarAlumno from './RegistrarAlumno';
 
 function GrupoDetail({ grupo, onBack, onRefresh }) {
@@ -9,11 +10,7 @@ function GrupoDetail({ grupo, onBack, onRefresh }) {
   const [showRegistrar, setShowRegistrar] = useState(false);
   const [registrandoHuella, setRegistrandoHuella] = useState(null);
 
-  useEffect(() => {
-    loadAlumnos();
-  }, [grupo.grupo_id]);
-
-  const loadAlumnos = async () => {
+  const loadAlumnos = useCallback(async () => {
     try {
       setLoading(true);
       const response = await ApiService.getAlumnosGrupo(grupo.grupo_id);
@@ -24,16 +21,54 @@ function GrupoDetail({ grupo, onBack, onRefresh }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [grupo.grupo_id]);
+
+  useEffect(() => {
+    loadAlumnos();
+  }, [loadAlumnos]);
 
   const handleRegistrarHuella = async (alumnoId, alumnoName) => {
-    if (!window.confirm(`¿Registrar huella para ${alumnoName}?\n\nColoca el dedo en el lector cuando se solicite.`)) {
+    // Verificar disponibilidad de WebAuthn
+    const availability = await WebAuthnService.checkAuthenticatorAvailability();
+    if (!availability.available && !WebAuthnService.isAvailable()) {
+      const protocol = window.location.protocol;
+      const hostname = window.location.hostname;
+      let errorMsg = 'El lector de huellas no está disponible.\n\n';
+      
+      if (protocol !== 'https:' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        errorMsg += 'WebAuthn requiere HTTPS o localhost para funcionar.\n';
+        errorMsg += `Estás usando: ${protocol}//${hostname}\n\n`;
+        errorMsg += 'Solución: Accede desde localhost o configura HTTPS.';
+      } else {
+        errorMsg += availability.reason || 'Usa un dispositivo móvil con lector de huellas.';
+      }
+      
+      alert(errorMsg);
+      return;
+    }
+
+    if (!window.confirm(`¿Registrar huella para ${alumnoName}?\n\nUsa el lector de huellas de tu dispositivo móvil cuando se solicite.`)) {
       return;
     }
 
     setRegistrandoHuella(alumnoId);
     try {
-      await ApiService.registrarHuella(alumnoId);
+      // Obtener challenge del servidor
+      const challengeData = await ApiService.obtenerChallengeRegistro(alumnoId);
+      
+      // Registrar credencial usando WebAuthn
+      const credentialData = await WebAuthnService.registerCredential(
+        alumnoId,
+        challengeData.user_name,
+        challengeData.challenge
+      );
+      
+      // Enviar credencial al servidor
+      await ApiService.registrarHuella(alumnoId, {
+        credential_id: credentialData.credential_id,
+        public_key: credentialData.public_key
+      });
+      
       alert(`✓ Huella registrada exitosamente para ${alumnoName}`);
       loadAlumnos();
     } catch (err) {

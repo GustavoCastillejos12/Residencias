@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ApiService from '../services/api';
+import WebAuthnService from '../services/webauthn';
 
 function RegistroRapido() {
   const [loading, setLoading] = useState(false);
@@ -59,15 +60,44 @@ function RegistroRapido() {
       return;
     }
 
+    // Verificar disponibilidad de WebAuthn (pero permitir intentar de todos modos)
+    const availability = await WebAuthnService.checkAuthenticatorAvailability();
+    if (!availability.available && !WebAuthnService.isAvailable()) {
+      const protocol = window.location.protocol;
+      const hostname = window.location.hostname;
+      let errorMsg = 'El lector de huellas no está disponible. ';
+      
+      if (protocol !== 'https:' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        errorMsg += 'WebAuthn requiere HTTPS o localhost. ';
+        errorMsg += `Estás usando: ${protocol}//${hostname}. `;
+        errorMsg += 'Intenta acceder desde localhost o configura HTTPS.';
+      } else {
+        errorMsg += availability.reason || 'Usa un dispositivo móvil con lector de huellas.';
+      }
+      
+      setError(errorMsg);
+      return;
+    }
+
     setLoading(true);
     setResult(null);
     setError(null);
     setIntentos(prev => prev + 1);
 
     try {
-      // Intentar verificar asistencia (identifica automáticamente al alumno)
-      // Pasar el grupo_id para validar que el alumno pertenezca al grupo
-      const response = await ApiService.verificarAsistencia(grupoSeleccionado.grupo_id);
+      // Obtener challenge del servidor
+      const challengeData = await ApiService.obtenerChallengeVerificacion(grupoSeleccionado.grupo_id);
+      
+      // Verificar credencial usando WebAuthn
+      const credentialData = await WebAuthnService.verifyCredential(
+        challengeData.challenge,
+        challengeData.allowed_credentials
+      );
+      
+      // Enviar verificación al servidor (identifica automáticamente al alumno)
+      const response = await ApiService.verificarAsistencia(grupoSeleccionado.grupo_id, {
+        credential_id: credentialData.credential_id
+      });
       
       if (response.encontrado) {
         setResult({

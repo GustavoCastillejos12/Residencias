@@ -1,5 +1,15 @@
 // Servicio API para comunicarse con el backend
-const API_BASE_URL = 'http://localhost:5000/api';
+// Detecta automáticamente si está en localhost o en red local
+const getApiBaseUrl = () => {
+  // Si estamos en localhost, usar localhost
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'http://localhost:5000/api';
+  }
+  // Si estamos accediendo desde una IP (teléfono), usar la misma IP pero puerto 5000
+  return `http://${window.location.hostname}:5000/api`;
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 class ApiService {
   // Health check
@@ -85,9 +95,24 @@ class ApiService {
     return await response.json();
   }
 
-  async registrarHuella(alumnoId) {
-    const response = await fetch(`${API_BASE_URL}/alumnos/${alumnoId}/huella`, {
+  async obtenerChallengeRegistro(alumnoId) {
+    const response = await fetch(`${API_BASE_URL}/alumnos/${alumnoId}/huella/challenge`, {
       method: 'POST'
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Error al obtener challenge');
+    }
+    return await response.json();
+  }
+
+  async registrarHuella(alumnoId, credentialData) {
+    const response = await fetch(`${API_BASE_URL}/alumnos/${alumnoId}/huella`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(credentialData)
     });
     if (!response.ok) {
       const error = await response.json();
@@ -134,13 +159,31 @@ class ApiService {
 
   // ==================== ASISTENCIA ====================
 
-  async verificarAsistencia(grupoId = null) {
-    const response = await fetch(`${API_BASE_URL}/asistencia/verificar`, {
+  async obtenerChallengeVerificacion(grupoId = null) {
+    const response = await fetch(`${API_BASE_URL}/asistencia/verificar/challenge`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(grupoId ? { grupo_id: grupoId } : {})
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Error al obtener challenge');
+    }
+    return await response.json();
+  }
+
+  async verificarAsistencia(grupoId, credentialData) {
+    const response = await fetch(`${API_BASE_URL}/asistencia/verificar`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        grupo_id: grupoId,
+        ...credentialData
+      })
     });
     if (!response.ok) {
       const error = await response.json();
@@ -193,4 +236,5 @@ class ApiService {
   }
 }
 
-export default new ApiService();
+const apiService = new ApiService();
+export default apiService;

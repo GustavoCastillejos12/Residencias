@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import ApiService from '../services/api';
+import WebAuthnService from '../services/webauthn';
 
 function RegistrarAlumno({ grupoId, onSuccess, onCancel }) {
   const [name, setName] = useState('');
@@ -36,7 +37,29 @@ function RegistrarAlumno({ grupoId, onSuccess, onCancel }) {
   };
 
   const handleRegistrarHuella = async (alumnoId, alumnoName) => {
-    if (!window.confirm(`¿Registrar huella para ${alumnoName}?\n\nColoca el dedo en el lector cuando se solicite.`)) {
+    // Verificar disponibilidad de WebAuthn
+    const availability = await WebAuthnService.checkAuthenticatorAvailability();
+    if (!availability.available && !WebAuthnService.isAvailable()) {
+      const protocol = window.location.protocol;
+      const hostname = window.location.hostname;
+      let errorMsg = 'El lector de huellas no está disponible.\n\n';
+      
+      if (protocol !== 'https:' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        errorMsg += 'WebAuthn requiere HTTPS o localhost.\n';
+        errorMsg += `Estás usando: ${protocol}//${hostname}\n\n`;
+        errorMsg += 'El alumno será registrado sin huella. Puedes registrarla después.';
+      } else {
+        errorMsg += 'El alumno será registrado sin huella. Puedes registrarla después desde la lista de alumnos.';
+      }
+      
+      const continuar = window.confirm(errorMsg + '\n\n¿Deseas continuar?');
+      if (continuar && onSuccess) {
+        onSuccess();
+      }
+      return;
+    }
+
+    if (!window.confirm(`¿Registrar huella para ${alumnoName}?\n\nUsa el lector de huellas de tu dispositivo móvil cuando se solicite.`)) {
       if (onSuccess) {
         onSuccess();
       }
@@ -45,7 +68,22 @@ function RegistrarAlumno({ grupoId, onSuccess, onCancel }) {
 
     setRegistrandoHuella(true);
     try {
-      await ApiService.registrarHuella(alumnoId);
+      // Obtener challenge del servidor
+      const challengeData = await ApiService.obtenerChallengeRegistro(alumnoId);
+      
+      // Registrar credencial usando WebAuthn
+      const credentialData = await WebAuthnService.registerCredential(
+        alumnoId,
+        challengeData.user_name,
+        challengeData.challenge
+      );
+      
+      // Enviar credencial al servidor
+      await ApiService.registrarHuella(alumnoId, {
+        credential_id: credentialData.credential_id,
+        public_key: credentialData.public_key
+      });
+      
       alert(`✓ Alumno y huella registrados exitosamente`);
       if (onSuccess) {
         onSuccess();

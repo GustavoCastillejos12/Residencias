@@ -52,7 +52,7 @@ function App() {
         <div className="header-content">
           <div>
             <h1>Sistema de Control de Asistencia</h1>
-            <p className="subtitle">Escuela Media Superior - Registro mediante Huellas Digitales</p>
+            <p className="subtitle">Escuela Media Superior - Registro mediante Huellas Digitales (WebAuthn)</p>
           </div>
           
           {deviceStatus && (

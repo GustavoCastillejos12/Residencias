@@ -1,11 +1,12 @@
 """
 Backend API para Sistema de Pase de Lista con Huellas Digitales
 Sistema para registro de asistencia de alumnos de escuela media superior
+Usa WebAuthn API para leer huellas desde dispositivos móviles
 """
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from fingerprint_reader import FingerprintReader, FingerprintDatabase
+from webauthn_handler import WebAuthnHandler, WebAuthnDatabase
 import base64
 import os
 import json
@@ -19,29 +20,28 @@ app = Flask(__name__)
 CORS(app)  # Permitir CORS para React
 
 # Configuración
-SDK_PATH = r"C:\Program Files\DigitalPersona\One Touch SDK"
 DB_FILE = "alumnos.json"
 GRUPOS_FILE = "grupos.json"
 
-# Instancia global del lector (se inicializa cuando se necesita)
-fingerprint_reader = None
-fingerprint_db = None
+# Instancia global del manejador WebAuthn
+webauthn_handler = None
+webauthn_db = None
 
 
-def get_fingerprint_reader():
-    """Obtiene o crea la instancia del lector de huellas"""
-    global fingerprint_reader
-    if fingerprint_reader is None:
-        fingerprint_reader = FingerprintReader(sdk_path=SDK_PATH)
-    return fingerprint_reader
+def get_webauthn_handler():
+    """Obtiene o crea la instancia del manejador WebAuthn"""
+    global webauthn_handler
+    if webauthn_handler is None:
+        webauthn_handler = WebAuthnHandler(db_file=DB_FILE)
+    return webauthn_handler
 
 
-def get_fingerprint_db():
+def get_webauthn_db():
     """Obtiene o crea la instancia de la base de datos"""
-    global fingerprint_db
-    if fingerprint_db is None:
-        fingerprint_db = FingerprintDatabase(db_file=DB_FILE)
-    return fingerprint_db
+    global webauthn_db
+    if webauthn_db is None:
+        webauthn_db = WebAuthnDatabase(db_file=DB_FILE)
+    return webauthn_db
 
 
 def load_grupos():
@@ -69,16 +69,14 @@ def save_grupos(grupos):
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Verifica el estado del sistema"""
-    reader = get_fingerprint_reader()
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     grupos = load_grupos()
     
     total_alumnos = len(db.fingerprints)
     
     return jsonify({
         'status': 'ok',
-        'sdk_loaded': reader.is_sdk_loaded(),
-        'device_count': reader.get_device_count() if reader.is_sdk_loaded() else 0,
+        'webauthn_disponible': True,
         'total_alumnos': total_alumnos,
         'total_grupos': len(grupos)
     })
@@ -86,21 +84,12 @@ def health_check():
 
 @app.route('/api/dispositivo/estado', methods=['GET'])
 def dispositivo_estado():
-    """Obtiene el estado del dispositivo de huellas"""
-    reader = get_fingerprint_reader()
-    
-    if not reader.is_sdk_loaded():
-        return jsonify({
-            'error': 'SDK no cargado',
-            'dispositivos': 0
-        }), 500
-    
-    device_count = reader.get_device_count()
-    
+    """Obtiene el estado del sistema WebAuthn"""
+    # WebAuthn está disponible si el navegador lo soporta (se verifica en el frontend)
     return jsonify({
-        'sdk_cargado': True,
-        'dispositivos_conectados': device_count,
-        'dispositivo_disponible': device_count > 0
+        'webauthn_disponible': True,
+        'dispositivo_disponible': True,  # Siempre disponible si el navegador soporta WebAuthn
+        'mensaje': 'Usa el lector de huellas de tu dispositivo móvil'
     })
 
 
@@ -115,7 +104,7 @@ def listar_grupos():
     grupos_list = []
     for grupo_id, grupo_data in grupos.items():
         # Contar alumnos en este grupo
-        db = get_fingerprint_db()
+        db = get_webauthn_db()
         alumnos_en_grupo = sum(1 for a in db.fingerprints.values() 
                               if a.get('grupo_id') == grupo_id)
         
@@ -183,14 +172,14 @@ def obtener_grupo(grupo_id):
         return jsonify({'error': 'Grupo no encontrado'}), 404
     
     grupo_data = grupos[grupo_id]
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     
     # Obtener alumnos del grupo
     alumnos = [
         {
             'user_id': uid,
             'name': data.get('name', ''),
-            'tiene_huella': 'template' in data and len(data.get('template', b'')) > 0,
+            'tiene_huella': len(data.get('credentials', [])) > 0,
             'registered_at': data.get('registered_at', '')
         }
         for uid, data in db.fingerprints.items()
@@ -219,7 +208,7 @@ def eliminar_grupo(grupo_id):
         return jsonify({'error': 'Grupo no encontrado'}), 404
     
     # Verificar si tiene alumnos
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     alumnos_en_grupo = sum(1 for a in db.fingerprints.values() 
                           if a.get('grupo_id') == grupo_id)
     
@@ -246,7 +235,7 @@ def listar_alumnos_grupo(grupo_id):
     if grupo_id not in grupos:
         return jsonify({'error': 'Grupo no encontrado'}), 404
     
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     alumnos = []
     
     for user_id, user_data in db.fingerprints.items():
@@ -255,8 +244,8 @@ def listar_alumnos_grupo(grupo_id):
                 'user_id': user_id,
                 'name': user_data.get('name', 'Sin nombre'),
                 'registered_at': user_data.get('registered_at', ''),
-                'tiene_huella': 'template' in user_data and len(user_data.get('template', b'')) > 0,
-                'huella_registrada_at': user_data.get('huella_registrada_at', '')
+                'tiene_huella': len(user_data.get('credentials', [])) > 0,
+                'huella_registrada_at': user_data.get('credentials', [{}])[-1].get('registered_at', '') if user_data.get('credentials') else ''
             })
     
     # Ordenar alfabéticamente por nombre
@@ -288,18 +277,25 @@ def registrar_alumno_grupo(grupo_id):
     if not name:
         return jsonify({'error': 'El nombre del alumno es requerido'}), 400
     
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     
     # Generar ID único para el alumno
     alumnos_en_grupo = sum(1 for a in db.fingerprints.values() 
                           if a.get('grupo_id') == grupo_id)
     user_id = f"{grupo_id}-{alumnos_en_grupo + 1:03d}"
     
-    # Registrar sin huella (se añadirá después)
-    db.add_fingerprint(user_id, b'', name)
+    # Registrar alumno sin credenciales aún
+    if user_id not in db.fingerprints:
+        db.fingerprints[user_id] = {
+            'name': name,
+            'registered_at': datetime.now().isoformat(),
+            'credentials': [],
+            'grupo_id': grupo_id
+        }
+    else:
+        db.fingerprints[user_id]['name'] = name
+        db.fingerprints[user_id]['grupo_id'] = grupo_id
     
-    # Asignar grupo al alumno
-    db.fingerprints[user_id]['grupo_id'] = grupo_id
     db.save_database()
     
     return jsonify({
@@ -310,66 +306,58 @@ def registrar_alumno_grupo(grupo_id):
     }), 201
 
 
-@app.route('/api/alumnos/<alumno_id>/huella', methods=['POST'])
-def registrar_huella_alumno(alumno_id):
-    """Registra o actualiza la huella de un alumno"""
-    reader = get_fingerprint_reader()
-    db = get_fingerprint_db()
-    
-    if not reader.is_sdk_loaded():
-        return jsonify({'error': 'SDK no cargado'}), 500
-    
-    # Verificar que el dispositivo esté disponible
-    device_count = reader.get_device_count()
-    if device_count <= 0:
-        return jsonify({'error': 'No hay dispositivos conectados'}), 500
+@app.route('/api/alumnos/<alumno_id>/huella/challenge', methods=['POST'])
+def crear_challenge_registro(alumno_id):
+    """Crea un challenge para registrar la huella del alumno usando WebAuthn"""
+    db = get_webauthn_db()
     
     # Verificar que el alumno existe
     if alumno_id not in db.fingerprints:
         return jsonify({'error': 'Alumno no encontrado. Regístralo primero.'}), 404
     
-    # Preparar dispositivo
-    if not reader.open_device(0):
-        return jsonify({'error': 'No se pudo abrir el dispositivo'}), 500
+    handler = get_webauthn_handler()
+    challenge = handler.create_challenge()
     
-    try:
-        # Capturar huella con reintentos automáticos
-        template = reader.capture_fingerprint(timeout=20000, max_retries=3)
-        
-        if not template:
-            return jsonify({
-                'error': 'No se pudo capturar la huella después de varios intentos',
-                'sugerencias': [
-                    'Verifique que el dedo esté limpio y seco',
-                    'Coloque el dedo firmemente sobre el sensor',
-                    'Asegúrese de que el sensor esté limpio',
-                    'Intente con otro dedo si es posible'
-                ]
-            }), 500
-        
-        # Actualizar la huella del alumno
-        alumno_data = db.fingerprints[alumno_id]
-        alumno_data['template'] = template
-        alumno_data['huella_registrada_at'] = datetime.now().isoformat()
-        db.save_database()
-        
-        return jsonify({
-            'message': 'Huella registrada exitosamente',
-            'user_id': alumno_id,
-            'name': alumno_data.get('name', ''),
-            'template_size': len(template)
-        })
-        
-    except Exception as e:
-        return jsonify({'error': f'Error al capturar huella: {str(e)}'}), 500
-    finally:
-        reader.close_device()
+    return jsonify({
+        'challenge': challenge,
+        'user_id': alumno_id,
+        'user_name': db.fingerprints[alumno_id].get('name', '')
+    })
+
+
+@app.route('/api/alumnos/<alumno_id>/huella', methods=['POST'])
+def registrar_huella_alumno(alumno_id):
+    """Registra la credencial WebAuthn del alumno"""
+    db = get_webauthn_db()
+    
+    # Verificar que el alumno existe
+    if alumno_id not in db.fingerprints:
+        return jsonify({'error': 'Alumno no encontrado. Regístralo primero.'}), 404
+    
+    data = request.json
+    
+    if not data or 'credential_id' not in data or 'public_key' not in data:
+        return jsonify({'error': 'Datos de credencial WebAuthn requeridos'}), 400
+    
+    credential_id = data.get('credential_id')
+    public_key = data.get('public_key')
+    
+    # Registrar la credencial
+    alumno_data = db.fingerprints[alumno_id]
+    db.add_credential(alumno_id, credential_id, public_key, alumno_data.get('name', ''))
+    
+    return jsonify({
+        'message': 'Huella registrada exitosamente',
+        'user_id': alumno_id,
+        'name': alumno_data.get('name', ''),
+        'credential_id': credential_id
+    })
 
 
 @app.route('/api/alumnos/<alumno_id>', methods=['DELETE'])
 def eliminar_alumno(alumno_id):
     """Elimina un alumno del sistema"""
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     
     if db.delete_user(alumno_id):
         return jsonify({'message': 'Alumno eliminado exitosamente'})
@@ -380,7 +368,7 @@ def eliminar_alumno(alumno_id):
 @app.route('/api/alumnos/<alumno_id>/asistencias', methods=['GET'])
 def obtener_asistencias(alumno_id):
     """Obtiene el historial de asistencias de un alumno"""
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     
     if alumno_id not in db.fingerprints:
         return jsonify({'error': 'Alumno no encontrado'}), 404
@@ -399,7 +387,7 @@ def obtener_asistencias(alumno_id):
 @app.route('/api/alumnos/<alumno_id>/asistencias', methods=['POST'])
 def registrar_asistencia_manual(alumno_id):
     """Registra asistencia manualmente (sin huella)"""
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     
     if alumno_id not in db.fingerprints:
         return jsonify({'error': 'Alumno no encontrado'}), 404
@@ -431,87 +419,88 @@ def registrar_asistencia_manual(alumno_id):
 
 # ==================== ASISTENCIA ====================
 
-@app.route('/api/asistencia/verificar', methods=['POST'])
-def verificar_asistencia():
-    """Verifica la asistencia capturando una huella e identificando al alumno"""
+@app.route('/api/asistencia/verificar/challenge', methods=['POST'])
+def crear_challenge_verificacion():
+    """Crea un challenge para verificar asistencia usando WebAuthn"""
     data = request.json or {}
     grupo_id = data.get('grupo_id')  # Opcional: filtrar por grupo
     
-    reader = get_fingerprint_reader()
-    db = get_fingerprint_db()
+    handler = get_webauthn_handler()
+    challenge = handler.create_challenge()
     
-    if not reader.is_sdk_loaded():
-        return jsonify({'error': 'SDK no cargado'}), 500
+    # Obtener lista de credential IDs permitidos si se especifica grupo
+    allowed_credentials = []
+    if grupo_id:
+        db = get_webauthn_db()
+        for user_id, user_data in db.fingerprints.items():
+            if user_data.get('grupo_id') == grupo_id:
+                credentials = user_data.get('credentials', [])
+                for cred in credentials:
+                    allowed_credentials.append({
+                        'id': cred['credential_id'],
+                        'type': 'public-key'
+                    })
     
-    device_count = reader.get_device_count()
-    if device_count <= 0:
-        return jsonify({'error': 'No hay dispositivos conectados'}), 500
+    return jsonify({
+        'challenge': challenge,
+        'allowed_credentials': allowed_credentials if allowed_credentials else None
+    })
+
+
+@app.route('/api/asistencia/verificar', methods=['POST'])
+def verificar_asistencia():
+    """Verifica la asistencia usando credencial WebAuthn"""
+    data = request.json or {}
+    grupo_id = data.get('grupo_id')  # Opcional: filtrar por grupo
+    credential_id = data.get('credential_id')
     
-    if not reader.open_device(0):
-        return jsonify({'error': 'No se pudo abrir el dispositivo'}), 500
+    if not credential_id:
+        return jsonify({'error': 'Credencial ID requerido'}), 400
     
-    try:
-        # Capturar huella con reintentos automáticos
-        template = reader.capture_fingerprint(timeout=20000, max_retries=3)
-        
-        if not template:
-            return jsonify({
-                'error': 'No se pudo capturar la huella después de varios intentos',
-                'sugerencias': [
-                    'Verifique que el dedo esté limpio y seco',
-                    'Coloque el dedo firmemente sobre el sensor',
-                    'Asegúrese de que el sensor esté limpio',
-                    'Intente con otro dedo si es posible'
-                ]
-            }), 500
-        
-        # Identificar al alumno
-        user_id = db.identify_fingerprint(template)
-        
-        if user_id:
-            alumno_data = db.fingerprints[user_id]
-            
-            # Si se especificó un grupo, verificar que el alumno pertenezca a ese grupo
-            if grupo_id and alumno_data.get('grupo_id') != grupo_id:
-                return jsonify({
-                    'encontrado': False,
-                    'message': 'El alumno no pertenece a este grupo'
-                })
-            
-            # Registrar asistencia
-            asistencia = {
-                'user_id': user_id,
-                'name': alumno_data.get('name', ''),
-                'timestamp': datetime.now().isoformat(),
-                'fecha': datetime.now().strftime('%Y-%m-%d'),
-                'hora': datetime.now().strftime('%H:%M:%S')
-            }
-            
-            # Guardar asistencia
-            if 'asistencias' not in alumno_data:
-                alumno_data['asistencias'] = []
-            alumno_data['asistencias'].append(asistencia)
-            db.save_database()
-            
-            return jsonify({
-                'encontrado': True,
-                'alumno': {
-                    'user_id': user_id,
-                    'name': alumno_data.get('name', ''),
-                    'grupo_id': alumno_data.get('grupo_id', '')
-                },
-                'asistencia': asistencia
-            })
-        else:
-            return jsonify({
-                'encontrado': False,
-                'message': 'Huella no reconocida. Alumno no registrado.'
-            })
-            
-    except Exception as e:
-        return jsonify({'error': f'Error al verificar asistencia: {str(e)}'}), 500
-    finally:
-        reader.close_device()
+    db = get_webauthn_db()
+    
+    # Buscar usuario por credential_id
+    user_id = db.find_user_by_credential_id(credential_id)
+    
+    if not user_id:
+        return jsonify({
+            'encontrado': False,
+            'message': 'Huella no reconocida. Alumno no registrado.'
+        })
+    
+    alumno_data = db.fingerprints[user_id]
+    
+    # Si se especificó un grupo, verificar que el alumno pertenezca a ese grupo
+    if grupo_id and alumno_data.get('grupo_id') != grupo_id:
+        return jsonify({
+            'encontrado': False,
+            'message': 'El alumno no pertenece a este grupo'
+        })
+    
+    # Registrar asistencia
+    asistencia = {
+        'user_id': user_id,
+        'name': alumno_data.get('name', ''),
+        'timestamp': datetime.now().isoformat(),
+        'fecha': datetime.now().strftime('%Y-%m-%d'),
+        'hora': datetime.now().strftime('%H:%M:%S')
+    }
+    
+    # Guardar asistencia
+    if 'asistencias' not in alumno_data:
+        alumno_data['asistencias'] = []
+    alumno_data['asistencias'].append(asistencia)
+    db.save_database()
+    
+    return jsonify({
+        'encontrado': True,
+        'alumno': {
+            'user_id': user_id,
+            'name': alumno_data.get('name', ''),
+            'grupo_id': alumno_data.get('grupo_id', '')
+        },
+        'asistencia': asistencia
+    })
 
 
 # ==================== ESTADÍSTICAS ====================
@@ -519,12 +508,12 @@ def verificar_asistencia():
 @app.route('/api/estadisticas', methods=['GET'])
 def obtener_estadisticas():
     """Obtiene estadísticas del sistema"""
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     grupos = load_grupos()
     
     total_alumnos = len(db.fingerprints)
     alumnos_con_huella = sum(1 for a in db.fingerprints.values() 
-                            if 'template' in a and len(a.get('template', b'')) > 0)
+                            if len(a.get('credentials', [])) > 0)
     total_asistencias = sum(len(a.get('asistencias', [])) for a in db.fingerprints.values())
     
     # Estadísticas por grupo
@@ -536,7 +525,7 @@ def obtener_estadisticas():
             'carrera_tecnica': grupo_data.get('carrera_tecnica', ''),
             'total_alumnos': len(alumnos_grupo),
             'alumnos_con_huella': sum(1 for a in alumnos_grupo 
-                                     if 'template' in a and len(a.get('template', b'')) > 0),
+                                     if len(a.get('credentials', [])) > 0),
             'total_asistencias': sum(len(a.get('asistencias', [])) for a in alumnos_grupo)
         }
     
@@ -563,7 +552,7 @@ def obtener_estadisticas():
 def descargar_excel_asistencias():
     """Genera y descarga un archivo Excel con las asistencias"""
     grupo_id = request.args.get('grupo_id', None)
-    db = get_fingerprint_db()
+    db = get_webauthn_db()
     grupos = load_grupos()
     
     # Obtener alumnos (del grupo específico o todos)
@@ -692,7 +681,7 @@ if __name__ == '__main__':
     print("=" * 60)
     print("  SISTEMA DE PASE DE LISTA - BACKEND API")
     print("=" * 60)
-    print(f"SDK Path: {SDK_PATH}")
+    print("  Usando WebAuthn API para lectura de huellas")
     print(f"Database: {DB_FILE}")
     print(f"Grupos: {GRUPOS_FILE}")
     print("\nIniciando servidor en http://localhost:5000")
@@ -705,9 +694,11 @@ if __name__ == '__main__':
     print("  Alumnos:")
     print("    GET    /api/grupos/<id>/alumnos")
     print("    POST   /api/grupos/<id>/alumnos")
+    print("    POST   /api/alumnos/<id>/huella/challenge")
     print("    POST   /api/alumnos/<id>/huella")
     print("    DELETE /api/alumnos/<id>")
     print("  Asistencia:")
+    print("    POST   /api/asistencia/verificar/challenge")
     print("    POST   /api/asistencia/verificar")
     print("  Estadísticas:")
     print("    GET    /api/estadisticas")

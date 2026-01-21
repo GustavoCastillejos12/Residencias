@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ApiService from '../services/api';
+import WebAuthnService from '../services/webauthn';
 
 function PasarLista({ grupo, alumnos, onFinalizar, onCambiarGrupo }) {
   const [indiceActual, setIndiceActual] = useState(0);
@@ -25,12 +26,42 @@ function PasarLista({ grupo, alumnos, onFinalizar, onCambiarGrupo }) {
   const handleVerificarHuella = async () => {
     if (!alumnoActual) return;
 
+    // Verificar disponibilidad de WebAuthn (pero permitir intentar de todos modos)
+    const availability = await WebAuthnService.checkAuthenticatorAvailability();
+    if (!availability.available && !WebAuthnService.isAvailable()) {
+      const protocol = window.location.protocol;
+      const hostname = window.location.hostname;
+      let errorMsg = 'El lector de huellas no está disponible. ';
+      
+      if (protocol !== 'https:' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        errorMsg += 'WebAuthn requiere HTTPS o localhost. ';
+        errorMsg += `Estás usando: ${protocol}//${hostname}`;
+      } else {
+        errorMsg += availability.reason || 'Usa un dispositivo móvil con lector de huellas.';
+      }
+      
+      setError(errorMsg);
+      return;
+    }
+
     setCapturandoHuella(true);
     setError(null);
     setMensaje(null);
 
     try {
-      const response = await ApiService.verificarAsistencia(grupo.grupo_id);
+      // Obtener challenge del servidor
+      const challengeData = await ApiService.obtenerChallengeVerificacion(grupo.grupo_id);
+      
+      // Verificar credencial usando WebAuthn
+      const credentialData = await WebAuthnService.verifyCredential(
+        challengeData.challenge,
+        challengeData.allowed_credentials
+      );
+      
+      // Enviar verificación al servidor
+      const response = await ApiService.verificarAsistencia(grupo.grupo_id, {
+        credential_id: credentialData.credential_id
+      });
       
       if (response.encontrado) {
         if (response.alumno.user_id === alumnoActual.user_id) {
